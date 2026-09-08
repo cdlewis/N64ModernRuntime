@@ -85,6 +85,7 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
         while (MQ_IS_FULL(mq)) {
             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
+            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
         }
     }
@@ -123,6 +124,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
         while (MQ_IS_EMPTY(mq)) {
             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
+            TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::BLOCKED;
             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
         }
     }

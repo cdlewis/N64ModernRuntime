@@ -153,6 +153,7 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
     if (TO_PTR(OSThread, ultramodern::this_thread())->context != thread_context) {
         osDestroyThread(PASS_RDRAM NULLPTR);
     }
+    TO_PTR(OSThread, ultramodern::this_thread())->state = OSThreadState::RUNNING;
 }
 
 void resume_thread(OSThread* t) {
@@ -233,11 +234,36 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
 
     // If this is a game thread, insert the new thread into the running queue and then check the running queue.
     if (thread_self) {
-        ultramodern::schedule_running_thread(PASS_RDRAM t_);
+        switch (t->state) {
+            case OSThreadState::STOPPED:
+                // A stopped message waiter retains its original queue, matching
+                // libultra: reinsert it there and wake the highest-priority waiter.
+                if (t->queue != NULLPTR && t->queue != ultramodern::running_queue) {
+                    auto queue = t->queue;
+                    t->state = OSThreadState::BLOCKED;
+                    ultramodern::thread_queue_insert(PASS_RDRAM queue, t_);
+                    ultramodern::schedule_running_thread(PASS_RDRAM ultramodern::thread_queue_pop(PASS_RDRAM queue));
+                }
+                else {
+                    ultramodern::schedule_running_thread(PASS_RDRAM t_);
+                }
+                break;
+            case OSThreadState::BLOCKED:
+                // Explicitly waking a waiter must not leave it on two queues.
+                ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+                ultramodern::schedule_running_thread(PASS_RDRAM t_);
+                break;
+            default:
+                // Starting an already runnable/running thread is a no-op.
+                return;
+        }
         ultramodern::check_running_queue(PASS_RDRAM1);
     }
     // Otherwise, immediately start the thread and terminate this one.
     else {
+        if (t->state != OSThreadState::STOPPED) {
+            return;
+        }
         t->state = OSThreadState::QUEUED;
         resume_thread(t);
         //throw ultramodern::thread_terminated{};
@@ -272,10 +298,22 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
     }
     // Check if the thread is stopping itself (arg is null or thread_self).
     if (t_ == thread_self) {
+        OSThread* t = TO_PTR(OSThread, t_);
+        t->state = OSThreadState::STOPPED;
+        t->queue = NULLPTR;
         ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
     }
     else {
-        assert(false);
+        OSThread* t = TO_PTR(OSThread, t_);
+        if (t->state != OSThreadState::STOPPED) {
+            // Game threads execute cooperatively, so a non-self target is queued
+            // or blocked. Remove it before any restart can reuse its next link.
+            if (t->queue != NULLPTR) {
+                ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+            }
+            t->next = NULLPTR;
+            t->state = OSThreadState::STOPPED;
+        }
     }
 }
 
