@@ -2,6 +2,7 @@
 #include <thread>
 #include <cassert>
 #include <string>
+#include <stdexcept>
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
@@ -228,6 +229,14 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
     ultramodern::cleanup_thread(thread_context);
 }
 
+static void remove_scheduled_thread(RDRAM_ARG PTR(OSThread) t_) {
+    OSThread* t = TO_PTR(OSThread, t_);
+    // Enforce single-queue ownership in release builds too.
+    if (t->queue == NULLPTR || !ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_)) {
+        throw std::runtime_error("Thread is missing from its scheduling queue");
+    }
+}
+
 extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
     OSThread* t = TO_PTR(OSThread, t_);
     debug_printf("[os] Start Thread %d\n", t->id);
@@ -249,8 +258,8 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
                 }
                 break;
             case OSThreadState::BLOCKED:
-                // Explicitly waking a waiter must not leave it on two queues.
-                ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+                // Transfer queue ownership; the resumed send/recv loop rechecks readiness.
+                remove_scheduled_thread(PASS_RDRAM t_);
                 ultramodern::schedule_running_thread(PASS_RDRAM t_);
                 break;
             default:
@@ -293,6 +302,10 @@ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_f
 }
 
 extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+    // Only the scheduled game thread may mutate these queues.
+    if (thread_self == NULLPTR) {
+        throw std::runtime_error("osStopThread requires a scheduled game thread");
+    }
     if (t_ == NULLPTR) {
         t_ = thread_self;
     }
@@ -305,15 +318,15 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
     }
     else {
         OSThread* t = TO_PTR(OSThread, t_);
-        if (t->state != OSThreadState::STOPPED) {
-            // Game threads execute cooperatively, so a non-self target is queued
-            // or blocked. Remove it before any restart can reuse its next link.
-            if (t->queue != NULLPTR) {
-                ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
-            }
-            t->next = NULLPTR;
-            t->state = OSThreadState::STOPPED;
+        if (t->state == OSThreadState::STOPPED) {
+            return;
         }
+        if (t->state != OSThreadState::QUEUED && t->state != OSThreadState::BLOCKED) {
+            throw std::runtime_error("osStopThread target is not suspended by the scheduler");
+        }
+        remove_scheduled_thread(PASS_RDRAM t_);
+        t->next = NULLPTR;
+        t->state = OSThreadState::STOPPED;
     }
 }
 
